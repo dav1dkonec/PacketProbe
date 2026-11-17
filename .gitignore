@@ -1,0 +1,10 @@
+.DS_Store
+build*/
+*.log
+
+.idea/
+cmake-build-*/
+
+# photos of the wiring
+*.jpeg
+*.jpg

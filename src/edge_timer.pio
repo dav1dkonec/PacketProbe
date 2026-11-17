@@ -1,0 +1,46 @@
+; Timestamps both edges of the jmp pin.
+;
+; X counts loop iterations down; every iteration takes exactly 2 cycles and
+; samples the pin in its first cycle. Exceptions, both fixed and corrected
+; by the CPU (EdgeTimer):
+;   - the iteration that pushes an edge does not decrement X
+;     -> iteration index = decrements + edges before it
+;   - X passing 0 costs one extra cycle (every 2^32 iterations, ~68 s at 125 MHz)
+; The first word is a marker of the initial level: 0 = low, ~0 = high.
+; Autopush with a joined RX FIFO drained by DMA: the push never stalls.
+
+.program edge_timer
+.wrap_target
+low:
+    jmp pin rise
+    jmp x-- low
+    jmp low             ; X wrapped: one extra cycle
+rise:
+    in x, 32            ; rising edge
+high:
+    jmp pin still_high
+    in x, 32            ; falling edge
+.wrap
+still_high:
+    jmp x-- high
+    jmp high            ; X wrapped: one extra cycle
+public start:
+    jmp pin start_high
+    in null, 32         ; marker: starts low
+    jmp low
+start_high:
+    in x, 32            ; marker: starts high (X = ~0)
+    jmp high
+
+% c-sdk {
+static inline void edge_timer_program_init(PIO pio, uint sm, uint offset, uint pin)
+{
+    pio_sm_config c = edge_timer_program_get_default_config(offset);
+    sm_config_set_jmp_pin(&c, pin);
+    sm_config_set_in_shift(&c, false, true, 32);  // autopush every word
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);  // 8-deep RX FIFO
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+    pio_sm_init(pio, sm, offset + edge_timer_offset_start, &c);
+    pio_sm_exec(pio, sm, pio_encode_mov_not(pio_x, pio_null));  // X = 0xffffffff
+}
+%}
