@@ -1,0 +1,71 @@
+; Test signals without the Pi: a simulated Ethernet frame and GPIO toggle.
+
+; Frame on one pin: N periods of 12 cycles (edges every 6 cycles, ~10.4 MHz
+; at 125 MHz), then a gap; raises IRQ 0 at the end of each frame.
+; Y = N - 1, OSR = gap loop count, both loaded once by the CPU.
+; One frame takes 12 N + gap + 4 cycles.
+.program sim_frame
+.wrap_target
+    mov x, y
+burst:
+    set pins, 1 [5]
+    set pins, 0 [4]
+    jmp x-- burst
+    irq nowait 0
+    mov x, osr
+gap:
+    jmp x-- gap
+.wrap
+
+; Toggles its pin a fixed delay after each IRQ 0 from sim_frame (the Pi's GPIO17).
+; Y = delay loop count; delay from the last frame edge = Y + ~10 cycles.
+.program sim_gpio
+.wrap_target
+    wait 1 irq 0
+    mov x, y
+d1:
+    jmp x-- d1
+    set pins, 1
+    wait 1 irq 0
+    mov x, y
+d2:
+    jmp x-- d2
+    set pins, 0
+.wrap
+
+% c-sdk {
+static inline void sim_load(PIO pio, uint sm, uint32_t value, uint dest_y)
+{
+    pio_sm_put_blocking(pio, sm, value);
+    pio_sm_exec(pio, sm, pio_encode_pull(false, true));  // OSR = value
+    if (dest_y) {
+        pio_sm_exec(pio, sm, pio_encode_mov(pio_y, pio_osr));
+    }
+}
+
+static inline void sim_pin_init(PIO pio, uint sm, pio_sm_config* c, uint pin)
+{
+    sm_config_set_set_pins(c, pin, 1);
+    pio_gpio_init(pio, pin);
+    pio_sm_set_pins_with_mask(pio, sm, 0, 1u << pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+}
+
+static inline void sim_frame_program_init(PIO pio, uint sm, uint offset, uint pin,
+                                          uint32_t periods, uint32_t gap)
+{
+    pio_sm_config c = sim_frame_program_get_default_config(offset);
+    sim_pin_init(pio, sm, &c, pin);
+    pio_sm_init(pio, sm, offset, &c);
+    sim_load(pio, sm, periods - 1, 1);
+    sim_load(pio, sm, gap, 0);  // stays in OSR: the program never pulls
+}
+
+static inline void sim_gpio_program_init(PIO pio, uint sm, uint offset, uint pin, uint32_t delay)
+{
+    pio_sm_config c = sim_gpio_program_get_default_config(offset);
+    sim_pin_init(pio, sm, &c, pin);
+    pio_sm_init(pio, sm, offset, &c);
+    sim_load(pio, sm, delay, 1);
+}
+%}
