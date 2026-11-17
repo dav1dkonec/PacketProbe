@@ -13,9 +13,9 @@ Ethernet frame on the wire and the receiver's GPIO toggle with PIO
 | GP3 (pin 5) | Pi GPIO17 (pin 11), through ~330 Ω |
 | GND (pin 3) | Pi GND (pin 6) |
 
-Simulation (`kSimulate` in `src/main.cpp`): the Pico generates both signals
-itself, jumpers GP4 → GP2 and GP5 → GP3. A frame of 57.6 us every 1 ms, GPIO
-toggle 25 us after its end.
+Simulation (`sim on`): the Pico generates both signals itself, jumpers
+GP4 → GP2 and GP5 → GP3: a frame of 57.6 us every 1 ms, GPIO toggle 25 us after
+its end. It refuses to start if anything else drives GP2/GP3.
 
 ## Build and flash
 
@@ -25,17 +25,38 @@ cmake -B build -G Ninja && cmake --build build
 picotool load -f -x build/probe.uf2      # first time: hold BOOTSEL while plugging in
 ```
 
-## Output (USB serial, /dev/cu.usbmodem*)
+## Output and commands (USB serial: /dev/ttyACM0 on the Pi, /dev/cu.usbmodem* on a Mac)
 
 ```
 index,start_ns,end_ns,gpio_ns,frame_ns,latency_ns,edges
 3698,3698132000,3698189552,3698214560,57552,25008,1200
-# frames 1000 matched 1000 unmatched 0, frame ns 57552-57552, latency ns min 25008 avg 25008 max 25008, ...
+# last second: uptime ns ..., frames 1000 matched 1000 unmatched 0, frame ns 57552-57552, latency ns min 25008 avg 25008 max 25008, ...
 ```
 
 Times are ns since start. `latency_ns` = GPIO edge − last edge of the frame;
-empty for a frame without a GPIO edge within 10 ms. Lines starting with `#` are
-a summary once a second.
+empty for a frame without a GPIO edge within 10 ms. Lines starting with `#`
+are status messages.
+
+Commands, one per line: `status`, `reset` (index from 0), `live` (CSV per
+frame, default), `deferred` (keep up to 10 000 results in RAM, nothing on USB
+while measuring), `dump`, `sim on|off`, `help`.
+
+## Logger
+
+`tools/probe_log.py` (Python 3, no dependencies) on the machine the Pico is
+plugged into, e.g. the Pi:
+
+```sh
+tools/probe_log.py live -o run.csv --seconds 15   # stream
+tools/probe_log.py arm                            # deferred + reset
+# ... run sender and receiver ...
+tools/probe_log.py dump -o run.csv                # fetch the run
+tools/probe_log.py cmd sim on                     # any command
+```
+
+On the Pi, keep the logger away from the receiver's CPU (`taskset -c 1`): USB
+traffic of the probe runs on the device under test. `arm`/`dump` avoids it
+during the measurement.
 
 ## Known limits
 
