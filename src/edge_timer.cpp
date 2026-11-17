@@ -4,7 +4,8 @@
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 
-EdgeTimer::EdgeTimer(PIO pio, uint pin) : pio_(pio)
+EdgeTimer::EdgeTimer(PIO pio, uint pin, uint32_t* ring, uint ring_bits)
+    : pio_(pio), ring_(ring), ring_mask_((1u << ring_bits) / sizeof(uint32_t) - 1)
 {
     gpio_init(pin);
     gpio_set_dir(pin, GPIO_IN);
@@ -24,7 +25,7 @@ EdgeTimer::EdgeTimer(PIO pio, uint pin) : pio_(pio)
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
     channel_config_set_read_increment(&c, false);
     channel_config_set_write_increment(&c, true);
-    channel_config_set_ring(&c, true, kRingBits);  // write address wraps in the ring
+    channel_config_set_ring(&c, true, ring_bits);  // write address wraps in the ring
     channel_config_set_dreq(&c, pio_get_dreq(pio, sm_, false));
     dma_channel_configure(dma_, &c, ring_, &pio->rxf[sm_], kDmaCount, true);
 }

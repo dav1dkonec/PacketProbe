@@ -14,7 +14,9 @@ public:
     /// Claims a state machine and a DMA channel; the state machine stays
     /// disabled until started, so several timers can start in sync:
     /// pio_enable_sm_mask_in_sync(pio, a.sm_mask() | b.sm_mask()).
-    EdgeTimer(PIO pio, uint pin);
+    /// @p ring: 2^@p ring_bits bytes, aligned to its size (DMA ring wrap).
+    /// Not a member: an aligned member would pad the object to 3x its size.
+    EdgeTimer(PIO pio, uint pin, uint32_t* ring, uint ring_bits);
 
     uint32_t sm_mask() const { return 1u << sm_; }
 
@@ -25,109 +27,62 @@ public:
     template <typename F>
     void drain(uint64_t now_bound, F&& on_edge)
     {
-        const uint32_t written = kDmaCount - dma_channel_hw_addr(dma_)->transfer_count;
-        uint32_t r = read_;
-        if (written - r > kRingLen) {
-            // the DMA overwrote unread words; their edges still count, so
-            // the time stays exact (a wrap of X inside the gap is still seen)
-            const uint32_t skipped = written - r - kRingLen;
-            overruns_ = overruns_ + skipped;
-            r += skipped;
-            if (!have_marker_) {
-                have_marker_ = true;  // lost with the skipped words: level unknown
-            }
-            edges_ += skipped;
-            level_ ^= (skipped & 1u) != 0;
-        }
-        for (; r != written; ++r) {
-            const uint32_t x = ring_[r & (kRingLen - 1)];
-            if (!have_marker_) {
-                have_marker_ = true;
-                level_ = x != 0;
-                continue;
-            }
-            if (x > last_x_) {
-                ++wraps_;  // X passed 0
-            }
-            decrements_ += last_x_ - x;  // modulo 2^32: also right across one wrap
-            last_x_ = x;
-            // the iteration that pushes an edge does not decrement X: + edges
-            uint64_t cycles = 2 * (decrements_ + edges_) + wraps_;
-            add_missed_wraps(cycles, now_bound, decrements_, wraps_);
-            ++edges_;
+        const uint32_t written = begin_batch();
+        for (uint32_t r = read_; r != written; ++r) {
+            const uint32_t x = ring_[r & ring_mask_];
+            sync(x);
+            uint64_t t = time_at(r);
+            add_missed_wraps(t, now_bound);
             level_ = !level_;
-            on_edge(cycles, level_);
+            on_edge(t, level_);
         }
-        read_ = r;
+        read_ = written;
     }
 
     /// Burst mode for the wire channel: edges closer than @p gap_iters loop
     /// iterations (2 cycles each) form one burst; calls
     /// @p on_burst(uint64_t start, uint64_t end, uint32_t edges) for each burst
-    /// that ended. Per edge only a 32-bit subtraction and a compare: the 64-bit
-    /// time is computed at burst boundaries only. Do not mix with drain().
-    /// @p now_bound as for drain().
+    /// that ended. Per edge only a load, a 32-bit subtraction and a compare
+    /// (~10 cycles, up to ~10M edges/s): the edge index is the word position,
+    /// the 64-bit time is computed at burst boundaries only.
+    /// @p now_bound as for drain(). Do not mix with drain().
     template <typename F>
     void drain_bursts(uint32_t gap_iters, uint64_t now_bound, F&& on_burst)
     {
-        const uint32_t written = kDmaCount - dma_channel_hw_addr(dma_)->transfer_count;
-        uint32_t r = read_;
-        if (r == written) {
-            return;
+        const uint32_t written = begin_batch();
+        if (lost_burst_) {
+            lost_burst_ = false;
+            burst_open_ = false;  // its edges are partly overwritten: drop it
         }
-        if (written - r > kRingLen) {
-            const uint32_t skipped = written - r - kRingLen;
-            overruns_ = overruns_ + skipped;
-            r += skipped;
-            have_marker_ = true;
-            edges_ += skipped;
-            burst_open_ = false;  // its edges are partly lost: drop it
-        }
-        if (!have_marker_) {
-            have_marker_ = true;
-            ++r;
-        }
-
-        // state in locals: keeps the loop in registers
+        // locals keep the loop in registers (Cortex-M0+: 8 low registers)
+        const uint32_t* const ring = ring_;
+        const uint32_t mask = ring_mask_;
         uint32_t last_x = last_x_;
-        uint64_t dec = decrements_;
-        uint64_t edges = edges_;
-        uint32_t wraps = wraps_;
         bool open = burst_open_;
-        uint64_t start = burst_start_;
-        uint32_t first_edge = burst_first_edge_;
 
-        for (; r != written; ++r) {
-            const uint32_t x = ring_[r & (kRingLen - 1)];
-            const uint32_t dx = last_x - x;  // decrements since the previous edge
-            const bool wrapped = x > last_x;
-            last_x = x;
-            dec += dx;
-            wraps += wrapped;
-            if (dx > gap_iters || !open) {
-                uint64_t t = 2 * (dec + edges) + wraps;
+        for (uint32_t r = read_; r != written; ++r) {
+            const uint32_t x = ring[r & mask];
+            const uint32_t d = last_x - x;  // decrements since the previous edge
+            if (d > gap_iters || !open) [[unlikely]] {
+                // a wrap of X (x > last_x) also lands here: d is then huge
+                const bool wrapped = x > last_x;
+                sync(x);
+                uint64_t t = time_at(r);
                 if (open) {
-                    // previous edge: dx + 1 iterations earlier (+1 cycle if X wrapped)
-                    on_burst(start, t - 2 * (uint64_t{dx} + 1) - wrapped,
-                             static_cast<uint32_t>(edges) - first_edge);
+                    // previous edge: d + 1 iterations earlier (+1 cycle if X wrapped)
+                    on_burst(burst_start_, t - 2 * (uint64_t{d} + 1) - wrapped, r - burst_first_);
                 }
-                // only a gap between bursts can hide whole wraps of X
-                add_missed_wraps(t, now_bound, dec, wraps);
+                add_missed_wraps(t, now_bound);
                 open = true;
-                start = t;
-                first_edge = static_cast<uint32_t>(edges);
+                burst_start_ = t;
+                burst_first_ = r;
             }
-            ++edges;
+            last_x = x;
         }
 
-        read_ = r;
+        read_ = written;
         last_x_ = last_x;
-        decrements_ = dec;
-        edges_ = edges;
-        wraps_ = wraps;
         burst_open_ = open;
-        burst_start_ = start;
-        burst_first_edge_ = first_edge;
     }
 
     /// Ends the open burst if its last edge is more than @p gap cycles before
@@ -138,10 +93,12 @@ public:
         if (!burst_open_) {
             return;
         }
-        const uint64_t last = 2 * (decrements_ + edges_ - 1) + wraps_;
+        const uint32_t r = read_ - 1;  // word of the last edge
+        const uint32_t d = ref_x_ - last_x_;
+        const uint64_t last = 2 * (dec_ + d + (r - 1)) + wraps_ + (last_x_ > ref_x_);
         if (now > last + gap) {
             burst_open_ = false;
-            on_burst(burst_start_, last, static_cast<uint32_t>(edges_) - burst_first_edge_);
+            on_burst(burst_start_, last, r + 1 - burst_first_);
         }
     }
 
@@ -158,41 +115,76 @@ public:
 private:
     /// X passes 0 every 2^32 iterations (~68.7 s at 125 MHz), one extra cycle each.
     static constexpr uint64_t kWrapCycles = (uint64_t{1} << 33) + 1;
+    static constexpr uint32_t kDmaCount = 0xffffffffu;  // ~1 h at 1.2M edges/s (10 Mb/s, 1 frame/ms)
+
+    /// Words written by the DMA; handles the marker and an overrun.
+    uint32_t begin_batch()
+    {
+        const uint32_t written = kDmaCount - dma_channel_hw_addr(dma_)->transfer_count;
+        if (written - read_ > ring_mask_ + 1) {
+            // the DMA overwrote unread words: skip them. Indexes stay right (word
+            // positions) and so does the time (taken from the next X).
+            const uint32_t skipped = written - read_ - (ring_mask_ + 1);
+            overruns_ = overruns_ + skipped;
+            read_ += skipped;
+            level_ ^= (skipped & 1u) != 0;
+            lost_burst_ = true;
+        }
+        if (read_ == 0 && written != 0) {
+            level_ = ring_[0] != 0;  // marker: level before the first edge
+            read_ = 1;
+        }
+        return written;
+    }
+
+    /// Moves the reference point (dec_, wraps_ at X = ref_x_) to X = @p x;
+    /// right as long as X decreased by less than one full wrap since.
+    void sync(uint32_t x)
+    {
+        dec_ += ref_x_ - x;  // modulo 2^32: also right across one wrap
+        wraps_ += x > ref_x_;
+        ref_x_ = x;
+    }
+
+    /// Time of the edge in word @p r, after sync() to its X.
+    /// Word 0 is the marker, so word r holds edge r - 1; the iteration that
+    /// pushes an edge does not decrement X: + the edges before it.
+    uint64_t time_at(uint32_t r) const { return 2 * (dec_ + (r - 1)) + wraps_; }
 
     /// Two edges more than one wrap apart look like less than one: the time
     /// @p t is then a multiple of kWrapCycles too early. @p now_bound tells by
     /// how many, as long as it is less than one wrap after the real time.
-    static void add_missed_wraps(uint64_t& t, uint64_t now_bound, uint64_t& dec, uint32_t& wraps)
+    void add_missed_wraps(uint64_t& t, uint64_t now_bound)
     {
         if (now_bound > t + kWrapCycles) {
             const uint64_t k = (now_bound - t) / kWrapCycles;
             t += k * kWrapCycles;
-            dec += k << 32;
-            wraps += static_cast<uint32_t>(k);
+            dec_ += k << 32;
+            wraps_ += static_cast<uint32_t>(k);
         }
     }
-
-    static constexpr uint32_t kDmaCount = 0xffffffffu;  // ~1 h at 1.2M edges/s (10 Mb/s, 1 frame/ms)
-    static constexpr uint kRingBits = 15;  // 32 KB ring = 8192 edges, ~7 frames at 10 Mb/s
-    static constexpr uint32_t kRingLen = (1u << kRingBits) / sizeof(uint32_t);
 
     PIO pio_;
     uint sm_;
     uint dma_;
-    alignas(1u << kRingBits) uint32_t ring_[kRingLen];  // DMA ring must be size aligned
+    uint32_t* ring_;
+    uint32_t ring_mask_;  // words - 1
 
-    uint32_t read_ = 0;  // words consumed
+    uint32_t read_ = 0;  // words consumed, word 0 = marker
     volatile uint32_t overruns_ = 0;
-    bool have_marker_ = false;
     bool level_ = false;  // level after the last decoded edge
-    uint32_t last_x_ = 0xffffffffu;
-    uint32_t wraps_ = 0;
-    uint64_t decrements_ = 0;
-    uint64_t edges_ = 0;
 
+    // reference point of the time: decrements and wraps of X until X = ref_x_
+    uint32_t ref_x_ = 0xffffffffu;
+    uint64_t dec_ = 0;
+    uint32_t wraps_ = 0;
+
+    // burst mode
+    uint32_t last_x_ = 0xffffffffu;
     bool burst_open_ = false;
+    bool lost_burst_ = false;
     uint64_t burst_start_ = 0;
-    uint32_t burst_first_edge_ = 0;  // edge index (low 32 bits) of its first edge
+    uint32_t burst_first_ = 0;  // word of its first edge
 };
 
 #endif // PROBE_EDGE_TIMER_H

@@ -6,7 +6,7 @@
 /// One frame on the wire and the GPIO edge that answered it (times in cycles).
 struct Result {
     bool matched;     // false: no GPIO edge within the timeout
-    uint32_t index;   // frame number since start
+    uint32_t index;   // frame number since reset
     uint64_t start;   // first edge of the frame
     uint64_t end;     // last edge of the frame
     uint64_t gpio;    // GPIO edge, 0 if !matched
@@ -31,9 +31,21 @@ public:
             link_pulses = link_pulses + 1;
             return;
         }
-        if (!frames_.push(Frame{start, end, edges, next_index_++})) {
+        if (!frames_.push(Frame{start, end, edges})) {
             dropped = dropped + 1;
         }
+    }
+
+    /// Starts a new run at @p now: frames that started earlier are not
+    /// reported, numbering restarts at 0. Pending frames and edges are kept,
+    /// so a frame in progress keeps its GPIO edge.
+    void reset(uint64_t now)
+    {
+        epoch_ = now;
+        next_index_ = 0;
+        link_pulses = 0;
+        stray_edges = 0;
+        dropped = 0;
     }
 
     void gpio_edge(uint64_t t)
@@ -59,8 +71,8 @@ public:
             }
             if (frames_.front(f) && f.end <= g) {
                 frames_.pop();
-                out(Result{true, f.index, f.start, f.end, g, f.edges});
-            } else {
+                emit(Result{true, 0, f.start, f.end, g, f.edges}, out);
+            } else if (g >= epoch_) {
                 stray_edges = stray_edges + 1;  // GPIO edge without a frame before it
             }
         }
@@ -80,7 +92,6 @@ private:
         uint64_t start;
         uint64_t end;
         uint32_t edges;
-        uint32_t index;
     };
 
     template <typename T, uint32_t N>
@@ -121,10 +132,22 @@ private:
     void emit_unmatched(const Frame& f, Out&& out)
     {
         frames_.pop();
-        out(Result{false, f.index, f.start, f.end, 0, f.edges});
+        emit(Result{false, 0, f.start, f.end, 0, f.edges}, out);
+    }
+
+    /// Numbers the result, or drops it if its frame started before reset().
+    template <typename Out>
+    void emit(Result r, Out&& out)
+    {
+        if (r.start < epoch_) {
+            return;
+        }
+        r.index = next_index_++;
+        out(r);
     }
 
     Params p_;
+    uint64_t epoch_ = 0;
     uint32_t next_index_ = 0;
     Fifo<Frame, 32> frames_;
     Fifo<uint64_t, 64> gpio_;
