@@ -20,6 +20,10 @@
 
 namespace {
 
+// USB text protocol (README "Protocol"): bump on any change of commands,
+// CSV columns or the '#' markers tools/probe_log.py waits for
+constexpr int kProtocolVersion = 1;
+
 constexpr uint kPinWire = 2;
 constexpr uint kPinGpio = 3;
 
@@ -321,6 +325,7 @@ void dump_records()
 void print_help()
 {
     std::printf("# commands:\n"
+                "#   version         firmware name and protocol version\n"
                 "#   status          totals since reset\n"
                 "#   reset           clear results, frame index from 0\n"
                 "#   live            CSV line per frame + summary every second (default)\n"
@@ -334,7 +339,9 @@ void print_help()
 
 void handle_command(const char* cmd)
 {
-    if (std::strcmp(cmd, "status") == 0) {
+    if (std::strcmp(cmd, "version") == 0) {
+        std::printf("# version PacketProbe protocol %d\n", kProtocolVersion);
+    } else if (std::strcmp(cmd, "status") == 0) {
         print_summary(g_deferred ? "deferred" : "live", g_total);
         if (g_deferred) {
             std::printf("# kept %" PRIu32 "/%lu, lost %" PRIu32 "\n", g_record_count,

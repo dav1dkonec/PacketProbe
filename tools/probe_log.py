@@ -22,6 +22,7 @@ import time
 import tty
 
 HEADER = "index,start_ns,end_ns,gpio_ns,frame_ns,latency_ns,edges"
+PROTOCOL = 1  # must match kProtocolVersion in the firmware (README "Protocol")
 
 
 class Probe:
@@ -30,6 +31,17 @@ class Probe:
         tty.setraw(self.fd)  # no echo, no line editing, no CR/LF translation
         termios.tcflush(self.fd, termios.TCIFLUSH)
         self.buf = b""
+
+    def check_version(self):
+        """Exits unless the device answers 'version' with our protocol."""
+        self.send("version")
+        for line in self.lines(0.5, total=2):
+            if line.startswith("# version PacketProbe protocol "):
+                version = int(line.rsplit(" ", 1)[1])
+                if version != PROTOCOL:
+                    sys.exit(f"firmware speaks protocol {version}, this script {PROTOCOL}: update one of them")
+                return
+        sys.exit("no answer to 'version': not PacketProbe firmware, or too old")
 
     def send(self, command):
         os.write(self.fd, (command + "\n").encode())
@@ -155,7 +167,9 @@ def main():
     cmd.set_defaults(func=cmd_cmd)
 
     args = p.parse_args()
-    args.func(Probe(args.port or find_port()), args)
+    probe = Probe(args.port or find_port())
+    probe.check_version()
+    args.func(probe, args)
 
 
 if __name__ == "__main__":

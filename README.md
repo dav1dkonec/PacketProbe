@@ -25,21 +25,35 @@ cmake -B build -G Ninja && cmake --build build
 picotool load -f -x build/probe.uf2      # first time: hold BOOTSEL while plugging in
 ```
 
-## Output and commands (USB serial: /dev/ttyACM0 on the Pi, /dev/cu.usbmodem* on a Mac)
+## Protocol (USB serial)
 
-```
-index,start_ns,end_ns,gpio_ns,frame_ns,latency_ns,edges
-3698,3698132000,3698189552,3698214560,57552,25008,1200
-# last second: uptime ns ..., frames 1000 matched 1000 unmatched 0, frame ns 57552-57552, latency ns min 25008 avg 25008 max 25008, ...
-```
+The Pico is a USB CDC serial port: `/dev/ttyACM0` on the Pi, `/dev/cu.usbmodem*`
+on a Mac (the baud rate is ignored). Text, one line per command or message.
+`tools/probe_log.py` relies on everything below; change both together and bump
+`kProtocolVersion` (firmware) and `PROTOCOL` (script).
 
-Times are ns since start. `latency_ns` = GPIO edge − last edge of the frame;
-empty for a frame without a GPIO edge within 10 ms. Lines starting with `#`
-are status messages.
+**Commands** (host → Pico, terminated by `\n`):
 
-Commands, one per line: `status`, `reset` (index from 0), `live` (CSV per
-frame, default), `deferred` (keep up to 10 000 results in RAM, nothing on USB
-while measuring), `dump`, `sim on|off`, `help`.
+| command | reply |
+|---|---|
+| `version` | `# version PacketProbe protocol 1` |
+| `status` | `# live: ...` or `# deferred: ...` totals since reset (+ `# kept N/10000, lost M`) |
+| `reset` | `# reset: frame index starts at 0`; frames that started earlier are not reported |
+| `live` | `# mode live`, the CSV header, then a CSV line per frame (default mode) |
+| `deferred` | `# mode deferred`; results stay in RAM (up to 10 000), nothing is sent |
+| `dump` | the CSV header, the kept results, `# end dump: N records, M lost (buffer full)` |
+| `sim on` / `sim off` | `# sim on: ...` / `# sim off`, or `# sim: wiring BAD ...` |
+| `help` | `# commands: ...` |
+
+**Lines** (Pico → host), told apart by their first character:
+
+- digit: a result, `index,start_ns,end_ns,gpio_ns,frame_ns,latency_ns,edges`
+- `index,...`: the CSV header
+- `#`: a status message; in live mode also `# last second: ...` once a second
+
+Times are ns since the Pico started. `latency_ns` = GPIO edge − last edge of
+the frame; `gpio_ns` and `latency_ns` are empty for a frame without a GPIO edge
+within 10 ms. In deferred mode `start_ns` has us resolution and `edges` is empty.
 
 ## Logger
 
