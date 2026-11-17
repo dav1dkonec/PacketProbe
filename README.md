@@ -39,6 +39,5 @@ a summary once a second.
 
 ## Known limits
 
-- The GPIO channel needs an edge at least every ~68 s (32-bit PIO counter).
 - One run lasts at most ~1 h at 1000 frames/s (DMA transfer count).
 - `index` counts all frames on the wire, including ARP.

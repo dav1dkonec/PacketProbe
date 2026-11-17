@@ -35,6 +35,7 @@ constexpr uint64_t kGapNs = 300;          // Manchester has an edge at least eve
 constexpr uint64_t kMinFrameNs = 2'000;   // link pulses are ~100 ns
 constexpr uint64_t kTimeoutNs = 10'000'000;
 constexpr uint64_t kNowMarginUs = 5;      // keeps "now" behind the PIO timers
+constexpr uint64_t kBoundMarginUs = 1000; // keeps the bound ahead of every edge
 
 uint32_t g_sys_hz;
 uint64_t g_start_us;
@@ -55,13 +56,14 @@ void __not_in_flash_func(core1_main)()
         // "now" first: every wire edge before it is in the DMA ring already
         const uint64_t us = time_us_64() - g_start_us;
         const uint64_t now = us > kNowMarginUs ? (us - kNowMarginUs) * (g_sys_hz / 1'000'000) : 0;
+        const uint64_t bound = (us + kBoundMarginUs) * (g_sys_hz / 1'000'000);
 
         const auto on_frame = [](uint64_t start, uint64_t end, uint32_t edges) {
             g_matcher->frame(start, end, edges);
         };
-        g_wire->drain_bursts(static_cast<uint32_t>(g_gap_cycles / 2), on_frame);
+        g_wire->drain_bursts(static_cast<uint32_t>(g_gap_cycles / 2), bound, on_frame);
         g_wire->close_idle_burst(now, g_gap_cycles, on_frame);
-        g_gpio->drain([](uint64_t t, bool) { g_matcher->gpio_edge(t); });
+        g_gpio->drain(bound, [](uint64_t t, bool) { g_matcher->gpio_edge(t); });
 
         uint64_t safe;
         if (!g_wire->open_burst(safe)) {
@@ -186,6 +188,7 @@ int main()
                             static_cast<unsigned long>(follow_wire), kPinSimGpio,
                             static_cast<unsigned long>(follow_gpio));
             }
+            std::printf("# uptime ns %" PRIu64 "\n", (time_us_64() - g_start_us) * 1000);
             std::printf("# frames %" PRIu32 " matched %" PRIu32 " unmatched %" PRIu32,
                         s.matched + s.unmatched, s.matched, s.unmatched);
             if (s.matched + s.unmatched > 0) {

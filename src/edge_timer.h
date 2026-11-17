@@ -19,10 +19,11 @@ public:
     uint32_t sm_mask() const { return 1u << sm_; }
 
     /// Calls @p on_edge(uint64_t cycles, bool rising) for every pending edge.
-    /// Hot path (up to ~1.2M edges/s): one DMA register read per batch and a
-    /// 32-bit subtraction per edge; inline so it runs from RAM with the caller.
+    /// @p now_bound: cycles since start, not earlier than any pending edge
+    /// (from time_us_64 with a margin); resolves wraps of X during long
+    /// silence, so it must be less than ~68 s after the edges (drain often).
     template <typename F>
-    void drain(F&& on_edge)
+    void drain(uint64_t now_bound, F&& on_edge)
     {
         const uint32_t written = kDmaCount - dma_channel_hw_addr(dma_)->transfer_count;
         uint32_t r = read_;
@@ -46,12 +47,13 @@ public:
                 continue;
             }
             if (x > last_x_) {
-                ++wraps_;  // X passed 0 (needs an edge at least every ~68 s)
+                ++wraps_;  // X passed 0
             }
-            decrements_ += last_x_ - x;  // modulo 2^32: also right across a wrap
+            decrements_ += last_x_ - x;  // modulo 2^32: also right across one wrap
             last_x_ = x;
             // the iteration that pushes an edge does not decrement X: + edges
-            const uint64_t cycles = 2 * (decrements_ + edges_) + wraps_;
+            uint64_t cycles = 2 * (decrements_ + edges_) + wraps_;
+            add_missed_wraps(cycles, now_bound, decrements_, wraps_);
             ++edges_;
             level_ = !level_;
             on_edge(cycles, level_);
@@ -64,8 +66,9 @@ public:
     /// @p on_burst(uint64_t start, uint64_t end, uint32_t edges) for each burst
     /// that ended. Per edge only a 32-bit subtraction and a compare: the 64-bit
     /// time is computed at burst boundaries only. Do not mix with drain().
+    /// @p now_bound as for drain().
     template <typename F>
-    void drain_bursts(uint32_t gap_iters, F&& on_burst)
+    void drain_bursts(uint32_t gap_iters, uint64_t now_bound, F&& on_burst)
     {
         const uint32_t written = kDmaCount - dma_channel_hw_addr(dma_)->transfer_count;
         uint32_t r = read_;
@@ -102,12 +105,14 @@ public:
             dec += dx;
             wraps += wrapped;
             if (dx > gap_iters || !open) {
-                const uint64_t t = 2 * (dec + edges) + wraps;
+                uint64_t t = 2 * (dec + edges) + wraps;
                 if (open) {
                     // previous edge: dx + 1 iterations earlier (+1 cycle if X wrapped)
                     on_burst(start, t - 2 * (uint64_t{dx} + 1) - wrapped,
                              static_cast<uint32_t>(edges) - first_edge);
                 }
+                // only a gap between bursts can hide whole wraps of X
+                add_missed_wraps(t, now_bound, dec, wraps);
                 open = true;
                 start = t;
                 first_edge = static_cast<uint32_t>(edges);
@@ -151,6 +156,22 @@ public:
     uint32_t overruns() const { return overruns_; }  // read by the other core
 
 private:
+    /// X passes 0 every 2^32 iterations (~68.7 s at 125 MHz), one extra cycle each.
+    static constexpr uint64_t kWrapCycles = (uint64_t{1} << 33) + 1;
+
+    /// Two edges more than one wrap apart look like less than one: the time
+    /// @p t is then a multiple of kWrapCycles too early. @p now_bound tells by
+    /// how many, as long as it is less than one wrap after the real time.
+    static void add_missed_wraps(uint64_t& t, uint64_t now_bound, uint64_t& dec, uint32_t& wraps)
+    {
+        if (now_bound > t + kWrapCycles) {
+            const uint64_t k = (now_bound - t) / kWrapCycles;
+            t += k * kWrapCycles;
+            dec += k << 32;
+            wraps += static_cast<uint32_t>(k);
+        }
+    }
+
     static constexpr uint32_t kDmaCount = 0xffffffffu;  // ~1 h at 1.2M edges/s (10 Mb/s, 1 frame/ms)
     static constexpr uint kRingBits = 15;  // 32 KB ring = 8192 edges, ~7 frames at 10 Mb/s
     static constexpr uint32_t kRingLen = (1u << kRingBits) / sizeof(uint32_t);
