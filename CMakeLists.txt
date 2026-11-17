@@ -20,3 +20,12 @@ target_include_directories(probe_core PUBLIC src)
 pico_generate_pio_header(probe_core ${CMAKE_CURRENT_LIST_DIR}/src/edge_timer.pio)
 pico_generate_pio_header(probe_core ${CMAKE_CURRENT_LIST_DIR}/src/sim.pio)
 target_link_libraries(probe_core PUBLIC pico_stdlib hardware_pio hardware_dma)
+
+add_executable(probe src/main.cpp)
+target_link_libraries(probe PRIVATE probe_core pico_multicore)
+
+# console over USB CDC (/dev/cu.usbmodem*), not over UART pins
+pico_enable_stdio_usb(probe 1)
+pico_enable_stdio_uart(probe 0)
+
+pico_add_extra_outputs(probe)  # .uf2, .bin, .hex, .dis
