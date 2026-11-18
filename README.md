@@ -73,6 +73,20 @@ On the Pi, keep the logger away from the receiver's CPU (`taskset -c 1`): USB
 traffic of the probe runs on the device under test. `arm`/`dump` avoids it
 during the measurement.
 
+## Joining with the receiver
+
+`tools/probe_join.py` pairs a probe run with the receiver's CSV (`latency_rx -o`):
+the k-th matched probe row is the k-th valid receiver row. It checks the pairing
+(`seq - index` constant), lost packets and the frame length, prints latency
+statistics and writes one row per packet:
+
+```sh
+tools/probe_join.py probe.csv rx.csv -o joined.csv --size 100
+```
+
+Start the receiver and `arm` the probe (with `frame` set to the test packet
+length) before the sender, so both runs begin with the same packet.
+
 ## Known limits
 
 - One run lasts at most ~1 h at 1000 frames/s (DMA transfer count).
