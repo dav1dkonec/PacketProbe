@@ -22,7 +22,7 @@ import time
 import tty
 
 HEADER = "index,start_ns,end_ns,gpio_ns,frame_ns,latency_ns,edges"
-PROTOCOL = 1  # must match kProtocolVersion in the firmware (README "Protocol")
+PROTOCOL = 2  # must match kProtocolVersion in the firmware (README "Protocol")
 
 
 class Probe:

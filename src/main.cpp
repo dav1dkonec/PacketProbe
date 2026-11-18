@@ -6,6 +6,7 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
 
@@ -22,7 +23,7 @@ namespace {
 
 // USB text protocol (README "Protocol"): bump on any change of commands,
 // CSV columns or the '#' markers tools/probe_log.py waits for
-constexpr int kProtocolVersion = 1;
+constexpr int kProtocolVersion = 2;
 
 constexpr uint kPinWire = 2;
 constexpr uint kPinGpio = 3;
@@ -251,8 +252,9 @@ void print_summary(const char* what, const Summary& s)
         std::printf(", latency ns min %" PRIu64 " avg %" PRIu64 " max %" PRIu64, s.lat_min,
                     s.lat_sum / s.matched, s.lat_max);
     }
-    std::printf(", link pulses %" PRIu32 ", stray gpio %" PRIu32 ", overruns %" PRIu32 "/%" PRIu32
-                ", dropped %" PRIu32 "/%" PRIu32 "\n",
+    std::printf(", other frames %" PRIu32 ", link pulses %" PRIu32 ", stray gpio %" PRIu32
+                ", overruns %" PRIu32 "/%" PRIu32 ", dropped %" PRIu32 "/%" PRIu32 "\n",
+                static_cast<uint32_t>(g_matcher->other_frames),
                 static_cast<uint32_t>(g_matcher->link_pulses), static_cast<uint32_t>(g_matcher->stray_edges),
                 g_wire->overruns(), g_gpio->overruns(), static_cast<uint32_t>(g_matcher->dropped),
                 static_cast<uint32_t>(g_queue_full));
@@ -322,6 +324,35 @@ void dump_records()
 // commands over USB, one per line
 // ---------------------------------------------------------------------------
 
+/// "frame MIN MAX" (ns) or "frame off"; without arguments prints the window.
+void set_frame_window(const char* args)
+{
+    // strtoul, not sscanf: scanf from newlib doubles the firmware size
+    char* end = nullptr;
+    const unsigned long min_ns = std::strtoul(args, &end, 10);
+    const bool got_min = end != args;
+    const char* rest = end;
+    const unsigned long max_ns = std::strtoul(rest, &end, 10);
+    const bool parsed = got_min && end != rest && *end == '\0';
+    if (std::strcmp(args, " off") == 0) {
+        g_matcher->window_min = 0;
+        g_matcher->window_max = UINT32_MAX;
+    } else if (parsed && min_ns <= max_ns && max_ns <= 10'000'000) {
+        // two stores: a frame decided in between sees one old and one new bound
+        g_matcher->window_max = static_cast<uint32_t>(ns_to_cycles(max_ns));
+        g_matcher->window_min = static_cast<uint32_t>(ns_to_cycles(min_ns));
+    } else if (args[0] != '\0') {
+        std::printf("# usage: frame MIN MAX (ns, MIN <= MAX <= 10000000) | frame off\n");
+        return;
+    }
+    if (g_matcher->window_max == UINT32_MAX) {
+        std::printf("# frame window off: all frames\n");
+    } else {
+        std::printf("# frame window %" PRIu64 "-%" PRIu64 " ns\n", cycles_to_ns(g_matcher->window_min),
+                    cycles_to_ns(g_matcher->window_max));
+    }
+}
+
 void print_help()
 {
     std::printf("# commands:\n"
@@ -332,7 +363,9 @@ void print_help()
                 "#   deferred        keep up to %lu results in RAM, no USB output while measuring\n"
                 "#   dump            print the kept results as CSV, ends with '# end dump'\n"
                 "#   (a run: deferred, reset, measure, dump)\n"
-                "#   sim on|off      simulated frame + GPIO on GP%u/GP%u (jumpers to GP%u/GP%u)\n",
+                "#   sim on|off      simulated frame + GPIO on GP%u/GP%u (jumpers to GP%u/GP%u)\n"
+                "#   frame MIN MAX   match only frames MIN-MAX ns long (test packets), others\n"
+                "#                   are counted as 'other frames'; 'frame off': all frames\n",
                 static_cast<unsigned long>(kRecordCapacity), kPinSimWire, kPinSimGpio, kPinWire,
                 kPinGpio);
 }
@@ -362,6 +395,8 @@ void handle_command(const char* cmd)
         sim_start();
     } else if (std::strcmp(cmd, "sim off") == 0) {
         sim_stop();
+    } else if (std::strncmp(cmd, "frame", 5) == 0) {
+        set_frame_window(cmd + 5);
     } else if (std::strcmp(cmd, "help") == 0) {
         print_help();
     } else if (cmd[0] != '\0') {

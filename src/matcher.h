@@ -24,11 +24,17 @@ public:
 
     explicit Matcher(const Params& p) : p_(p) {}
 
-    /// A burst on the wire; shorter than min_frame = link pulse, dropped.
+    /// A burst on the wire; shorter than min_frame = link pulse, dropped,
+    /// outside the length window = another frame (ARP, mDNS, ...), dropped.
     void frame(uint64_t start, uint64_t end, uint32_t edges)
     {
-        if (end - start < p_.min_frame) {
+        const uint64_t len = end - start;
+        if (len < p_.min_frame) {
             link_pulses = link_pulses + 1;
+            return;
+        }
+        if (len < window_min || len > window_max) {
+            other_frames = other_frames + 1;
             return;
         }
         if (!frames_.push(Frame{start, end, edges})) {
@@ -44,6 +50,7 @@ public:
         epoch_ = now;
         next_index_ = 0;
         link_pulses = 0;
+        other_frames = 0;
         stray_edges = 0;
         dropped = 0;
     }
@@ -82,8 +89,14 @@ public:
         }
     }
 
+    /// Frame length window in cycles, set by the other core (32-bit stores
+    /// are atomic); default: every frame.
+    volatile uint32_t window_min = 0;
+    volatile uint32_t window_max = UINT32_MAX;
+
     // read by the other core for the summary (written only by this one)
     volatile uint32_t link_pulses = 0;
+    volatile uint32_t other_frames = 0;  // outside the length window
     volatile uint32_t stray_edges = 0;
     volatile uint32_t dropped = 0;  // internal queues full
 

@@ -36,12 +36,13 @@ on a Mac (the baud rate is ignored). Text, one line per command or message.
 
 | command | reply |
 |---|---|
-| `version` | `# version PacketProbe protocol 1` |
+| `version` | `# version PacketProbe protocol 2` |
 | `status` | `# live: ...` or `# deferred: ...` totals since reset (+ `# kept N/10000, lost M`) |
 | `reset` | `# reset: frame index starts at 0`; frames that started earlier are not reported |
 | `live` | `# mode live`, the CSV header, then a CSV line per frame (default mode) |
 | `deferred` | `# mode deferred`; results stay in RAM (up to 10 000), nothing is sent |
 | `dump` | the CSV header, the kept results, `# end dump: N records, M lost (buffer full)` |
+| `frame MIN MAX` / `frame off` | `# frame window MIN-MAX ns` / `# frame window off: all frames`; only frames of this length (ns) are paired, see below |
 | `sim on` / `sim off` | `# sim on: ...` / `# sim off`, or `# sim: wiring BAD ...` |
 | `help` | `# commands: ...` |
 
@@ -75,4 +76,13 @@ during the measurement.
 ## Known limits
 
 - One run lasts at most ~1 h at 1000 frames/s (DMA transfer count).
-- `index` counts all frames on the wire, including ARP.
+- Without a frame window, `index` counts all frames on the wire, including ARP.
+
+## Test frames
+
+The sender pads each packet to a fixed UDP payload (`-s`, default 100 B), so its
+frames have a length no other traffic is likely to have. On 10BASE-T a frame
+lasts (8 + max(64, 46 + payload)) × 0.8 us: 123.2 us for 100 B, 57.6 us for ARP.
+`frame 122000 125000` pairs only test frames; the rest is counted as
+`other frames` in `status`. The window stays set across `reset` until `frame off`
+or a reboot (default: off).
